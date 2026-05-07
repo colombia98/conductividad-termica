@@ -16,7 +16,7 @@ st.markdown("""
     """, unsafe_allow_html=True)
 
 # ==============================================================================
-# BASE DE DATOS DE REFERENCIA (Compuestos y sus propiedades)
+# BASE DE DATOS DE REFERENCIA
 # ==============================================================================
 COMPUESTOS_INFO = {
     "Hidrógeno": {"Formula": "H2", "M": 0.002016, "M_gmol": 2.016},
@@ -29,7 +29,6 @@ COMPUESTOS_INFO = {
     "n-Butano": {"Formula": "C4H10", "M": 0.058123, "M_gmol": 58.123}
 }
 
-# Parámetros críticos y complementarios para los modelos
 PROPIEDADES_CRITICAS = {
     "Hidrógeno": {"Tc": 32.98, "Pc_bar": 12.93, "w": -0.217},
     "Metano": {"Tc": 190.56, "Pc_bar": 45.98, "w": 0.011},
@@ -39,6 +38,18 @@ PROPIEDADES_CRITICAS = {
     "Propileno": {"Tc": 364.90, "Pc_bar": 46.00, "w": 0.142},
     "Propano": {"Tc": 369.83, "Pc_bar": 42.48, "w": 0.152},
     "n-Butano": {"Tc": 425.12, "Pc_bar": 37.96, "w": 0.200}
+}
+
+# Temperaturas de ebullición (Tb en K)
+T_EBULLICION = {
+    "Hidrógeno": 20.28,
+    "Metano": 111.66,
+    "Etano": 184.55,
+    "Etileno": 169.35,
+    "Acetileno": 189.15,
+    "Propileno": 225.50,
+    "Propano": 231.10,
+    "n-Butano": 272.66
 }
 
 # ==============================================================================
@@ -60,34 +71,15 @@ if 'tabla_mezclas' not in st.session_state:
 # ==============================================================================
 
 def eucken_modificado(eta, Cp, Cv, M, R=8.314):
-    """
-    Método de Eucken Modificado
-    eta: viscosidad dinámica (N·s/m² = Pa·s)
-    Cp: capacidad calorífica a presión constante (J/mol·K)
-    Cv: capacidad calorífica a volumen constante (J/mol·K)
-    M: peso molecular (kg/mol)
-    R: constante de gases (J/mol·K)
-    """
     lambda_calc = (eta * Cv / M) * (1.32 + 1.77 / (Cv / R))
     return lambda_calc
 
 def chung_et_al(eta, Cv, M, T, Tc, w, R=8.314):
-    """
-    Método de Chung et al.
-    eta: viscosidad dinámica (Pa·s)
-    Cv: capacidad calorífica a volumen constante (J/mol·K)
-    M: peso molecular (kg/mol)
-    T: temperatura (K)
-    Tc: temperatura crítica (K)
-    w: factor acéntrico
-    R: constante de gases (J/mol·K)
-    """
     Tr = T / Tc
     alpha = Cv / R - 1.5
     beta = 0.7862 - 0.7109 * w + 1.3168 * w**2
     Z = 2.0 + 10.5 * Tr**2
     
-    # Cálculo de Psi
     numerador = 0.215 + 0.28288 * alpha - 1.061 * beta + 0.26665 * Z
     denominador = 0.6366 + beta * Z + 1.061 * alpha * beta
     Psi = 1 + alpha * (numerador / denominador)
@@ -100,17 +92,11 @@ def chung_et_al(eta, Cv, M, T, Tc, w, R=8.314):
 # ==============================================================================
 
 def gamma_roy_thodos(Tc, Pc_bar, M_gmol):
-    """
-    Cálculo de Γ (inversa de conductividad reducida) para el método de Wassiljewa
-    """
-    Pc_atm = Pc_bar * 0.986923  # Convertir bar a atm
+    Pc_atm = Pc_bar * 0.986923
     gamma = 210 * ((Tc**2 * M_gmol**3) / (Pc_atm**4))**(1/6)
     return gamma
 
 def lambda_tr_ratio(T, Tc_i, Tc_j, gamma_i, gamma_j):
-    """
-    Relación de conductividades translacionales para Wassiljewa-Mason-Saxena
-    """
     Tri = T / Tc_i
     Trj = T / Tc_j
     f_i = np.exp(0.0464 * Tri) - np.exp(-0.2412 * Tri)
@@ -119,16 +105,11 @@ def lambda_tr_ratio(T, Tc_i, Tc_j, gamma_i, gamma_j):
     return ratio
 
 def wassiljewa_mason_saxena(y, lambda_i, M_gmol, Tc, Pc_bar, T):
-    """
-    Regla de mezcla de Wassiljewa con modificación de Mason y Saxena
-    """
     n = len(y)
-    # Calcular Gamma para cada componente
     gamma = {}
     for i in range(n):
         gamma[i] = gamma_roy_thodos(Tc[i], Pc_bar[i], M_gmol[i])
     
-    # Construir matriz de interacción A_ij
     A = np.ones((n, n))
     for i in range(n):
         for j in range(n):
@@ -138,32 +119,41 @@ def wassiljewa_mason_saxena(y, lambda_i, M_gmol, Tc, Pc_bar, T):
                 denom = np.sqrt(8 * (1 + M_gmol[i] / M_gmol[j]))
                 A[i, j] = term / denom
     
-    # Calcular conductividad de la mezcla
     lambda_m = 0
     for i in range(n):
         numerador = y[i] * lambda_i[i]
         denominador = sum(y[j] * A[i, j] for j in range(n))
         if denominador > 0:
             lambda_m += numerador / denominador
-    
     return lambda_m
 
-def lindsay_bromley(y, lambda_i, eta_i, Cp_i, gamma_i_ratio, M_gmol, Tb, T):
+def lindsay_bromley(y, lambda_i, Cp_i, gamma_i, M_gmol, Tb_lista, T):
     """
-    Regla de mezcla de Lindsay y Bromley
+    Regla de Lindsay y Bromley simplificada
+    La viscosidad se estima a partir de λ y Cp usando la relación de Eucken
     """
     n = len(y)
     # Constante de Sutherland
-    S_i = 1.5 * np.array(Tb)
+    S_i = 1.5 * np.array(Tb_lista)
+    
+    # Estimar viscosidad a partir de λ y Cp usando relación inversa de Eucken
+    R = 8.314
+    eta_i = np.zeros(n)
+    for i in range(n):
+        # Despejar η de λ = (η*Cv/M)*(1.32 + 1.77/(Cv/R))
+        Cv_i = Cp_i[i] / gamma_i[i]
+        factor_eucken = 1.32 + 1.77 / (Cv_i / R)
+        M_kg = M_gmol[i] / 1000
+        eta_i[i] = (lambda_i[i] * M_kg) / (Cv_i * factor_eucken)
     
     # Construir matriz de interacción A_ij
     A = np.ones((n, n))
     for i in range(n):
         for j in range(n):
             if i != j:
-                # Relación de viscosidades usando aproximación de Eucken modificada
-                term_visc = (lambda_i[i] / lambda_i[j]) * (Cp_i[j] / Cp_i[i])
-                term_visc *= (9 - 5/gamma_i_ratio[i]) / (9 - 5/gamma_i_ratio[j])
+                # Relación de viscosidades
+                term_visc = (eta_i[i] / eta_i[j]) * (Cp_i[j] / Cp_i[i])
+                term_visc *= (9 - 5/gamma_i[i]) / (9 - 5/gamma_i[j])
                 
                 # Factor de masa molecular
                 mass_factor = (M_gmol[j] / M_gmol[i])**0.75
@@ -171,13 +161,8 @@ def lindsay_bromley(y, lambda_i, eta_i, Cp_i, gamma_i_ratio, M_gmol, Tb, T):
                 # Factor de Sutherland
                 sutherland_factor = ((1 + S_i[i]/T) / (1 + S_i[j]/T))**0.5
                 
-                # Término entre corchetes
                 bracket = term_visc * mass_factor * sutherland_factor
-                
-                # Constante de Sutherland cruzada
                 S_ij = np.sqrt(S_i[i] * S_i[j])
-                
-                # A_ij final
                 A[i, j] = 0.25 * (1 + bracket**2) * ((1 + S_ij/T) / (1 + S_i[i]/T))
     
     # Calcular conductividad de la mezcla
@@ -187,14 +172,13 @@ def lindsay_bromley(y, lambda_i, eta_i, Cp_i, gamma_i_ratio, M_gmol, Tb, T):
         denominador = sum(y[j] * A[i, j] for j in range(n))
         if denominador > 0:
             lambda_m += numerador / denominador
-    
     return lambda_m
 
 # ==============================================================================
-# INTERFAZ PRINCIPAL - MÓDULO DE SUSTANCIAS PURAS
+# INTERFAZ PRINCIPAL
 # ==============================================================================
 st.title("Determinación de Conductividad Térmica - FTIQ")
-st.info("💡 **Nota:** Este software estima la conductividad térmica de gases usando modelos moleculares (Eucken Modificado y Chung et al.). Para mezclas gaseosas se pueden aplicar reglas de Wassiljewa-Mason-Saxena y Lindsay-Bromley.")
+st.info("💡 Este software estima la conductividad térmica de gases usando modelos moleculares (Eucken Modificado y Chung et al.) y reglas de mezcla (Wassiljewa-Mason-Saxena y Lindsay-Bromley).")
 
 st.sidebar.header("Navegación")
 menu = st.sidebar.radio("Módulo de Trabajo:", ["Sustancias Puras", "Reglas de Mezclado"])
@@ -207,34 +191,12 @@ if menu == "Sustancias Puras":
     
     modelo = st.selectbox("Modelo Matemático:", ["Eucken Modificado", "Chung et al."])
     
-    # --- BLOQUE INFORMATIVO DEL MODELO ---
     with st.expander("📖 Ver Ecuación y Variables del Modelo", expanded=True):
         if modelo == "Eucken Modificado":
             st.latex(r"\lambda = \frac{\eta C_v}{M}\left(1.32 + \frac{1.77}{C_v/R}\right)")
-            st.markdown("""
-            **Variables:**
-            - **λ**: Conductividad térmica (W/m·K)
-            - **η**: Viscosidad dinámica (Pa·s)
-            - **Cv**: Capacidad calorífica a volumen constante (J/mol·K)
-            - **M**: Peso molecular (kg/mol)
-            - **R**: Constante de gases (8.314 J/mol·K)
-            """)
         elif modelo == "Chung et al.":
             st.latex(r"\lambda = \frac{3.75\,\Psi\,\eta C_v}{M\,(C_v/R)}")
-            st.latex(r"\Psi = 1 + \alpha\left[\frac{0.215 + 0.28288\alpha - 1.061\beta + 0.26665Z}{0.6366 + \beta Z + 1.061\alpha\beta}\right]")
-            st.markdown("""
-            **Variables:**
-            - **λ**: Conductividad térmica (W/m·K)
-            - **η**: Viscosidad dinámica (Pa·s)
-            - **Cv**: Capacidad calorífica a volumen constante (J/mol·K)
-            - **M**: Peso molecular (kg/mol)
-            - **α = Cv/R - 1.5**
-            - **β = 0.7862 - 0.7109ω + 1.3168ω²**
-            - **Z = 2.0 + 10.5Tr²** (Tr = T/Tc)
-            - **ω**: Factor acéntrico
-            """)
     
-    # --- ENTRADA DE DATOS ---
     st.subheader("Entrada de Datos")
     col1, col2, col3 = st.columns(3)
     
@@ -255,7 +217,6 @@ if menu == "Sustancias Puras":
             Tc = st.number_input("Temperatura Crítica Tc (K):", value=PROPIEDADES_CRITICAS[comp]["Tc"], format="%.2f")
             w = st.number_input("Factor Acéntrico ω:", value=PROPIEDADES_CRITICAS[comp]["w"], format="%.4f")
     
-    # --- BOTÓN DE CÁLCULO ---
     if st.button("Ejecutar Cálculo"):
         try:
             if modelo == "Eucken Modificado":
@@ -263,42 +224,18 @@ if menu == "Sustancias Puras":
             elif modelo == "Chung et al.":
                 lambda_calc = chung_et_al(eta, Cv, M_kg, T, Tc, w)
             
-            # Cálculo del error
-            if lambda_exp > 0:
-                error = abs(lambda_exp - lambda_calc) / lambda_exp * 100
-            else:
-                error = 0.0
+            error = abs(lambda_exp - lambda_calc) / lambda_exp * 100 if lambda_exp > 0 else 0.0
             
-            # Guardar en memoria
             nuevo_registro = pd.DataFrame([{
-                "Componente": comp,
-                "Modelo": modelo,
-                "T (K)": T,
-                "P (MPa)": P,
-                "Exp (W/m·K)": lambda_exp,
-                "Calc (W/m·K)": round(lambda_calc, 6),
+                "Componente": comp, "Modelo": modelo, "T (K)": T, "P (MPa)": P,
+                "Exp (W/m·K)": lambda_exp, "Calc (W/m·K)": round(lambda_calc, 6),
                 "Error (%)": round(error, 3)
             }])
             st.session_state.tabla_puras = pd.concat([st.session_state.tabla_puras, nuevo_registro], ignore_index=True)
-            
-            # Mostrar resultado
             st.success(f"✅ Cálculo finalizado: λ = {lambda_calc:.6f} W/m·K (Error: {error:.2f}%)")
-            
-            # Mostrar auditoría
-            if modelo == "Eucken Modificado":
-                st.markdown(f"""
-                <div class='intermedio'>
-                <b>🔢 Auditoría de Ecuaciones (Eucken Modificado):</b><br><br>
-                λ = (η·Cv/M) × (1.32 + 1.77/(Cv/R))<br>
-                λ = ({eta:.4e} × {Cv:.3f} / {M_kg:.6f}) × (1.32 + 1.77/({Cv/8.314:.3f}))<br>
-                λ = <b>{lambda_calc:.6f} W/m·K</b>
-                </div>
-                """, unsafe_allow_html=True)
-            
         except Exception as e:
             st.error(f"Error en el cálculo: {e}")
     
-    # --- TABLA DE RESULTADOS Y GRÁFICOS ---
     if not st.session_state.tabla_puras.empty:
         st.write("---")
         st.subheader("Memoria de Resultados y Validación")
@@ -311,54 +248,28 @@ if menu == "Sustancias Puras":
             ])
             st.rerun()
         
-        # Filtrar datos con valor experimental válido
         df_valid = st.session_state.tabla_puras[st.session_state.tabla_puras["Exp (W/m·K)"] > 0]
-        
         if len(df_valid) > 0:
             y_exp = df_valid["Exp (W/m·K)"].astype(float).values
             y_calc = df_valid["Calc (W/m·K)"].astype(float).values
             nombres = df_valid["Componente"].values
-            
-            # Error global MAPE
             mape = np.mean(np.abs((y_exp - y_calc) / y_exp)) * 100
             
             col_met1, col_met2 = st.columns(2)
             col_met1.metric("Error Global MAPE", f"{mape:.3f} %")
-            
             if len(y_exp) > 1:
                 r2 = r2_score(y_exp, y_calc)
                 col_met2.metric("Coeficiente de Determinación (R²)", f"{r2:.5f}")
             
-            # Gráfico de dispersión
             fig = go.Figure()
-            fig.add_trace(go.Scatter(
-                x=y_exp, y=y_calc,
-                mode='markers+text',
-                text=nombres,
-                textposition="top center",
-                marker=dict(size=10, color='#0056b3'),
-                name="Conductividad Calculada"
-            ))
-            
-            val_min = min(min(y_exp), min(y_calc)) * 0.95
-            val_max = max(max(y_exp), max(y_calc)) * 1.05
-            fig.add_trace(go.Scatter(
-                x=[val_min, val_max], y=[val_min, val_max],
-                mode='lines',
-                name='Línea Ideal (Exp = Calc)',
-                line=dict(color='red', dash='dash')
-            ))
-            
-            fig.update_layout(
-                title="Diagrama de Dispersión: λ Experimental vs λ Calculada",
-                xaxis_title="λ Experimental (W/m·K)",
-                yaxis_title="λ Calculada (W/m·K)",
-                template="plotly_white"
-            )
+            fig.add_trace(go.Scatter(x=y_exp, y=y_calc, mode='markers+text', text=nombres, textposition="top center", marker=dict(size=10, color='#0056b3'), name="Calculada"))
+            val_min, val_max = min(min(y_exp), min(y_calc)) * 0.95, max(max(y_exp), max(y_calc)) * 1.05
+            fig.add_trace(go.Scatter(x=[val_min, val_max], y=[val_min, val_max], mode='lines', name='Ideal', line=dict(color='red', dash='dash')))
+            fig.update_layout(title="λ Experimental vs λ Calculada", xaxis_title="λ Experimental (W/m·K)", yaxis_title="λ Calculada (W/m·K)", template="plotly_white")
             st.plotly_chart(fig, use_container_width=True)
 
 # ==============================================================================
-# MÓDULO 2: REGLAS DE MEZCLADO
+# MÓDULO 2: REGLAS DE MEZCLADO (VERSIÓN SIMPLIFICADA)
 # ==============================================================================
 elif menu == "Reglas de Mezclado":
     st.header("Estimación de Mezclas Gaseosas Multicomponentes")
@@ -366,168 +277,122 @@ elif menu == "Reglas de Mezclado":
     regla = st.selectbox("Seleccione la Regla de Mezclado:", 
                          ["Wassiljewa-Mason-Saxena", "Lindsay-Bromley"])
     
-    # --- BLOQUE INFORMATIVO DE MEZCLA ---
-    with st.expander("📖 Ver Ecuación de la Regla de Mezclado", expanded=True):
-        if regla == "Wassiljewa-Mason-Saxena":
-            st.latex(r"\lambda_m = \sum_{i=1}^{n} \frac{y_i \lambda_i}{\sum_{j=1}^{n} y_j A_{ij}}")
-            st.latex(r"A_{ij} = \frac{\left[1 + \left(\frac{\lambda_{tr,i}}{\lambda_{tr,j}}\right)^{1/2}\left(\frac{M_j}{M_i}\right)^{1/4}\right]^2}{\left[8\left(1 + \frac{M_i}{M_j}\right)\right]^{1/2}}")
-            st.markdown("""
-            **Variables:**
-            - **λₘ**: Conductividad térmica de la mezcla
-            - **yᵢ**: Fracción molar del componente i
-            - **λᵢ**: Conductividad del componente puro i
-            - **Aᵢⱼ**: Parámetro de interacción binaria
-            - **Mᵢ**: Peso molecular del componente i
-            """)
-        elif regla == "Lindsay-Bromley":
-            st.latex(r"\lambda_m = \sum_{i=1}^{n} \frac{y_i \lambda_i}{\sum_{j=1}^{n} y_j A_{ij}}")
-            st.latex(r"A_{ij} = \frac{1}{4}\left\{1 + \left[\frac{\mu_i}{\mu_j}\left(\frac{M_j}{M_i}\right)^{3/4}\left(\frac{1+S_i/T}{1+S_j/T}\right)^{1/2}\right]^2\right\}\left(\frac{1+S_{ij}/T}{1+S_i/T}\right)")
-            st.markdown("""
-            **Variables:**
-            - **λₘ**: Conductividad térmica de la mezcla
-            - **μᵢ**: Viscosidad del componente i
-            - **Sᵢ**: Constante de Sutherland del componente i
-            - **T**: Temperatura de la mezcla
-            """)
-    
-    # --- ENTRADA DE DATOS DE LA MEZCLA ---
     st.subheader("Composición de la Mezcla")
     st.info("Ingrese las fracciones molares y las conductividades individuales de cada componente.")
     
-    # Crear DataFrame editable con todos los compuestos
+    # Tabla simplificada - SOLO columnas necesarias
     data_mezcla = []
     for comp in COMPUESTOS_INFO:
         data_mezcla.append({
             "Componente": comp,
             "Fracción Molar (yᵢ)": 0.0,
             "λᵢ (W/m·K)": 0.0,
-            "ηᵢ (Pa·s)": 1.0e-5,
             "Cp (J/mol·K)": 30.0,
-            "γ (Cp/Cv)": 1.3,
-            "M (g/mol)": COMPUESTOS_INFO[comp]["M_gmol"],
-            "Tb (K)": 300.0
+            "Cv (J/mol·K)": 20.0,
+            "M (g/mol)": COMPUESTOS_INFO[comp]["M_gmol"]
         })
     
     df_mezcla = st.data_editor(pd.DataFrame(data_mezcla), num_rows="fixed", use_container_width=True)
     
-    # --- PARÁMETROS ADICIONALES ---
-    col_temp, col_mezcla = st.columns(2)
-    with col_temp:
-        T_mezcla = st.number_input("Temperatura de la Mezcla (K):", value=300.0, step=10.0)
+    # Control de temperatura - MÁS VISIBLE
+    st.write("---")
+    st.subheader("🌡️ Control de Temperatura")
     
-    # --- BOTÓN DE CÁLCULO PARA UN PUNTO ---
-    if st.button("Calcular Conductividad de la Mezcla"):
+    col_temp1, col_temp2, col_temp3 = st.columns([2, 1, 1])
+    with col_temp1:
+        T_operacion = st.number_input("Temperatura de operación (K):", value=300.0, step=10.0, key="temp_principal")
+    with col_temp2:
+        if st.button("📊 Calcular a esta T", use_container_width=True):
+            st.session_state.temp_actual = T_operacion
+    with col_temp3:
+        nueva_temp = st.number_input("Nueva T (K) para agregar:", value=350.0, step=10.0, key="temp_nueva")
+        if st.button("➕ Agregar temperatura", use_container_width=True):
+            st.session_state.temp_agregar = nueva_temp
+    
+    # Inicializar variable de temperatura a usar
+    if 'temp_actual' not in st.session_state:
+        st.session_state.temp_actual = 300.0
+    
+    # Botón principal de cálculo
+    if st.button("🚀 Calcular Conductividad de la Mezcla", type="primary"):
+        T_usar = st.session_state.get('temp_actual', 300.0)
+        
         y = df_mezcla["Fracción Molar (yᵢ)"].astype(float).values
         lambda_i = df_mezcla["λᵢ (W/m·K)"].astype(float).values
         M_gmol = df_mezcla["M (g/mol)"].astype(float).values
-        eta_i = df_mezcla["ηᵢ (Pa·s)"].astype(float).values
         Cp_i = df_mezcla["Cp (J/mol·K)"].astype(float).values
-        gamma_i = df_mezcla["γ (Cp/Cv)"].astype(float).values
-        Tb_i = df_mezcla["Tb (K)"].astype(float).values
+        Cv_i = df_mezcla["Cv (J/mol·K)"].astype(float).values
+        
+        # Calcular gamma internamente
+        gamma_i = Cp_i / Cv_i
         
         suma_y = sum(y)
         if not np.isclose(suma_y, 1.0, atol=0.01) and suma_y > 0:
-            st.warning(f"⚠️ La suma de fracciones molares es {suma_y:.4f}. Se normalizarán automáticamente.")
+            st.warning(f"⚠️ La suma de fracciones molares es {suma_y:.4f}. Se normalizarán.")
             y = y / suma_y
         
         try:
             if regla == "Wassiljewa-Mason-Saxena":
                 Tc_lista = [PROPIEDADES_CRITICAS[comp]["Tc"] for comp in df_mezcla["Componente"]]
                 Pc_lista = [PROPIEDADES_CRITICAS[comp]["Pc_bar"] for comp in df_mezcla["Componente"]]
-                
-                lambda_m = wassiljewa_mason_saxena(y, lambda_i, M_gmol, Tc_lista, Pc_lista, T_mezcla)
-            elif regla == "Lindsay-Bromley":
-                lambda_m = lindsay_bromley(y, lambda_i, eta_i, Cp_i, gamma_i, M_gmol, Tb_i, T_mezcla)
+                lambda_m = wassiljewa_mason_saxena(y, lambda_i, M_gmol, Tc_lista, Pc_lista, T_usar)
+            else:  # Lindsay-Bromley
+                Tb_lista = [T_EBULLICION[comp] for comp in df_mezcla["Componente"]]
+                lambda_m = lindsay_bromley(y, lambda_i, Cp_i, gamma_i, M_gmol, Tb_lista, T_usar)
             
-            # Guardar en memoria
-            nuevo_registro = pd.DataFrame([{
-                "T (K)": T_mezcla,
-                "Regla_Mezcla": regla,
-                "lambda_calc (W/m·K)": round(lambda_m, 6)
-            }])
-            st.session_state.tabla_mezclas = pd.concat([st.session_state.tabla_mezclas, nuevo_registro], ignore_index=True)
-            
-            st.success(f"✅ Conductividad de la mezcla ({regla}): λ = {lambda_m:.6f} W/m·K")
-            
+            nuevo = pd.DataFrame([{"T (K)": T_usar, "Regla_Mezcla": regla, "lambda_calc (W/m·K)": round(lambda_m, 6)}])
+            st.session_state.tabla_mezclas = pd.concat([st.session_state.tabla_mezclas, nuevo], ignore_index=True)
+            st.success(f"✅ λ = {lambda_m:.6f} W/m·K a T = {T_usar} K")
         except Exception as e:
-            st.error(f"Error en el cálculo de la mezcla: {e}")
+            st.error(f"Error: {e}")
     
-    # --- SEÑAL PARA AÑADIR MÚLTIPLES TEMPERATURAS ---
-    st.write("---")
-    st.subheader("Análisis a Múltiples Temperaturas")
-    st.info("Puede calcular la conductividad de la misma mezcla a diferentes temperaturas para visualizar la tendencia.")
-    
-    col_Tnueva, col_calcular = st.columns([2, 1])
-    with col_Tnueva:
-        T_nueva = st.number_input("Nueva Temperatura (K):", value=350.0, step=10.0, key="multitemp")
-    with col_calcular:
-        if st.button("Agregar a esta Temperatura", key="btn_multitemp"):
-            y = df_mezcla["Fracción Molar (yᵢ)"].astype(float).values
-            lambda_i = df_mezcla["λᵢ (W/m·K)"].astype(float).values
-            M_gmol = df_mezcla["M (g/mol)"].astype(float).values
-            eta_i = df_mezcla["ηᵢ (Pa·s)"].astype(float).values
-            Cp_i = df_mezcla["Cp (J/mol·K)"].astype(float).values
-            gamma_i = df_mezcla["γ (Cp/Cv)"].astype(float).values
-            Tb_i = df_mezcla["Tb (K)"].astype(float).values
+    # Botón para agregar temperatura adicional
+    if 'temp_agregar' in st.session_state:
+        T_extra = st.session_state.temp_agregar
+        y = df_mezcla["Fracción Molar (yᵢ)"].astype(float).values
+        lambda_i = df_mezcla["λᵢ (W/m·K)"].astype(float).values
+        M_gmol = df_mezcla["M (g/mol)"].astype(float).values
+        Cp_i = df_mezcla["Cp (J/mol·K)"].astype(float).values
+        Cv_i = df_mezcla["Cv (J/mol·K)"].astype(float).values
+        gamma_i = Cp_i / Cv_i
+        
+        suma_y = sum(y)
+        if not np.isclose(suma_y, 1.0, atol=0.01) and suma_y > 0:
+            y = y / suma_y
+        
+        try:
+            if regla == "Wassiljewa-Mason-Saxena":
+                Tc_lista = [PROPIEDADES_CRITICAS[comp]["Tc"] for comp in df_mezcla["Componente"]]
+                Pc_lista = [PROPIEDADES_CRITICAS[comp]["Pc_bar"] for comp in df_mezcla["Componente"]]
+                lambda_m = wassiljewa_mason_saxena(y, lambda_i, M_gmol, Tc_lista, Pc_lista, T_extra)
+            else:
+                Tb_lista = [T_EBULLICION[comp] for comp in df_mezcla["Componente"]]
+                lambda_m = lindsay_bromley(y, lambda_i, Cp_i, gamma_i, M_gmol, Tb_lista, T_extra)
             
-            suma_y = sum(y)
-            if not np.isclose(suma_y, 1.0, atol=0.01) and suma_y > 0:
-                y = y / suma_y
-            
-            try:
-                if regla == "Wassiljewa-Mason-Saxena":
-                    Tc_lista = [PROPIEDADES_CRITICAS[comp]["Tc"] for comp in df_mezcla["Componente"]]
-                    Pc_lista = [PROPIEDADES_CRITICAS[comp]["Pc_bar"] for comp in df_mezcla["Componente"]]
-                    lambda_m = wassiljewa_mason_saxena(y, lambda_i, M_gmol, Tc_lista, Pc_lista, T_nueva)
-                elif regla == "Lindsay-Bromley":
-                    lambda_m = lindsay_bromley(y, lambda_i, eta_i, Cp_i, gamma_i, M_gmol, Tb_i, T_nueva)
-                
-                nuevo = pd.DataFrame([{
-                    "T (K)": T_nueva,
-                    "Regla_Mezcla": regla,
-                    "lambda_calc (W/m·K)": round(lambda_m, 6)
-                }])
-                st.session_state.tabla_mezclas = pd.concat([st.session_state.tabla_mezclas, nuevo], ignore_index=True)
-                st.success(f"✅ Registro añadido a T = {T_nueva} K: λ = {lambda_m:.6f} W/m·K")
-                
-            except Exception as e:
-                st.error(f"Error: {e}")
+            nuevo = pd.DataFrame([{"T (K)": T_extra, "Regla_Mezcla": regla, "lambda_calc (W/m·K)": round(lambda_m, 6)}])
+            st.session_state.tabla_mezclas = pd.concat([st.session_state.tabla_mezclas, nuevo], ignore_index=True)
+            st.success(f"✅ Agregado: λ = {lambda_m:.6f} W/m·K a T = {T_extra} K")
+            del st.session_state.temp_agregar
+        except Exception as e:
+            st.error(f"Error: {e}")
     
-    # --- TABLA DE RESULTADOS Y GRÁFICO λ vs T ---
+    # Tabla de resultados y gráfico
     if not st.session_state.tabla_mezclas.empty:
         st.write("---")
-        st.subheader("Historial de Conductividad de la Mezcla")
+        st.subheader("📈 Historial y Gráfico λ vs Temperatura")
         
-        # Filtrar por la regla de mezcla actual
         df_actual = st.session_state.tabla_mezclas[st.session_state.tabla_mezclas["Regla_Mezcla"] == regla]
-        
         if not df_actual.empty:
             st.dataframe(df_actual.sort_values("T (K)"), use_container_width=True)
             
-            # Gráfico λ vs Temperatura
             df_sorted = df_actual.sort_values("T (K)")
             fig_temp = go.Figure()
-            fig_temp.add_trace(go.Scatter(
-                x=df_sorted["T (K)"],
-                y=df_sorted["lambda_calc (W/m·K)"],
-                mode='lines+markers',
-                marker=dict(size=8, color='#0056b3'),
-                line=dict(width=2),
-                name=f"{regla}"
-            ))
-            
-            fig_temp.update_layout(
-                title=f"Conductividad Térmica de la Mezcla vs Temperatura<br><sub>{regla}</sub>",
-                xaxis_title="Temperatura (K)",
-                yaxis_title="Conductividad Térmica λ (W/m·K)",
-                template="plotly_white"
-            )
+            fig_temp.add_trace(go.Scatter(x=df_sorted["T (K)"], y=df_sorted["lambda_calc (W/m·K)"], mode='lines+markers', marker=dict(size=8, color='#0056b3'), line=dict(width=2), name=f"{regla}"))
+            fig_temp.update_layout(title=f"Conductividad Térmica vs Temperatura<br><sub>{regla}</sub>", xaxis_title="Temperatura (K)", yaxis_title="λ (W/m·K)", template="plotly_white")
             st.plotly_chart(fig_temp, use_container_width=True)
         
-        if st.button("Limpiar Memoria de Mezclas"):
-            st.session_state.tabla_mezclas = pd.DataFrame(columns=[
-                "T (K)", "Regla_Mezcla", "lambda_calc (W/m·K)"
-            ])
+        if st.button("🗑️ Limpiar Memoria de Mezclas"):
+            st.session_state.tabla_mezclas = pd.DataFrame(columns=["T (K)", "Regla_Mezcla", "lambda_calc (W/m·K)"])
             st.rerun()
 
 # ==============================================================================
@@ -535,5 +400,5 @@ elif menu == "Reglas de Mezclado":
 # ==============================================================================
 st.sidebar.markdown("---")
 st.sidebar.markdown("📚 **Referencias**")
-st.sidebar.markdown("- Poling, B. E., Prausnitz, J. M., & O'Connell, J. P. (2001). *The Properties of Gases and Liquids* (5th ed.). McGraw-Hill.")
-st.sidebar.markdown("- Hopp, M., & Gross, J. (2019). Thermal Conductivity from Entropy Scaling: A Group-Contribution Method. *I&EC Research*, 58(45), 20816-20828.")
+st.sidebar.markdown("- Poling, B. E. et al. (2001). *The Properties of Gases and Liquids* (5th ed.).")
+st.sidebar.markdown("- Hopp, M. & Gross, J. (2019). *I&EC Research*, 58(45), 20816-20828.")
